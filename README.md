@@ -20,7 +20,8 @@
 - [Key Innovations](#key-innovations)
 - [Performance](#performance)
 - [Quick Start](#quick-start)
-- [Installation](#installation)
+- [🚀 Google Colab Setup](#-google-colab-setup-easiest-method)
+- [Installation (Local)](#installation-local-setup)
 - [Usage](#usage)
 - [Architecture](#architecture)
 - [Project Structure](#project-structure)
@@ -136,7 +137,69 @@ python final_inference.py --file clinical_note.txt --save result.json
 
 ---
 
-## Installation
+## 🚀 Google Colab Setup (Easiest Method)
+
+**Want to run ShifaMind with ZERO local setup?** Use our pre-configured Google Colab notebook!
+
+### One-Click Colab Setup
+
+1. **Upload your data to Google Drive** (if not already there):
+   ```
+   My Drive/
+   └── ShifaMind/
+       └── 01_Raw_Datasets/Extracted/
+           ├── umls-2025AA-metathesaurus-full/
+           ├── icd10cm-CodesDescriptions-2024/
+           ├── mimic-iv-3.1/
+           └── mimic-iv-note-2.2/
+   ```
+
+2. **Open the Colab notebook**:
+   - Upload `colab_setup.ipynb` to Google Colab, or
+   - Click: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SyedMohammedSameer/ShifaMind_Capstone/blob/main/colab_setup.ipynb)
+
+3. **Run all cells** - that's it! The notebook will:
+   - Mount your Google Drive
+   - Clone the repository
+   - Install dependencies (only what Colab doesn't have)
+   - Configure paths automatically
+   - Run the complete pipeline
+
+### What You Get
+
+✅ **No local installation required**
+✅ **Free GPU access** (T4, or A100 with Colab Pro)
+✅ **All dependencies pre-installed** (PyTorch, CUDA, etc.)
+✅ **Automatic path configuration**
+✅ **Interactive demo interface**
+✅ **Step-by-step guidance**
+
+### Custom Paths on Colab
+
+If your data is at a different Google Drive location, use our path helper:
+
+```python
+# In Colab
+!python setup_paths.py --base-path /content/drive/MyDrive/YourFolder/ShifaMind
+```
+
+Or set the environment variable manually:
+
+```python
+import os
+os.environ['SHIFAMIND_BASE_PATH'] = '/content/drive/MyDrive/YourFolder/ShifaMind'
+```
+
+### Colab Tips
+
+- **GPU**: Enable GPU via Runtime → Change runtime type → Select T4 GPU
+- **Timeout**: Keep browser tab active during training, or use Colab Pro
+- **Storage**: Training generates ~2GB of model checkpoints
+- **Speed**: Full training takes ~6 hours on T4, ~1 hour on A100
+
+---
+
+## Installation (Local Setup)
 
 ### Prerequisites
 
@@ -343,14 +406,16 @@ results = predictor.predict_batch(list_of_texts)
 ```
 ShifaMind/
 ├── config.py                              # Centralized configuration
+├── setup_paths.py                         # Path configuration helper
 ├── final_concept_filter.py                 # Animal concept filtering
 ├── final_knowledge_base_generator.py       # KB creation from UMLS/ICD-10
 ├── final_model_training.py                 # Complete training pipeline
 ├── final_evaluation.py                     # Comprehensive evaluation
 ├── final_inference.py                      # Standalone inference
 ├── final_demo.py                          # Interactive Gradio demo
-├── final_complete_pipeline.ipynb          # End-to-end Colab notebook
-├── requirements.txt                        # Python dependencies
+├── colab_setup.ipynb                      # 🚀 ONE-CLICK Colab setup
+├── requirements.txt                        # Python dependencies (full)
+├── requirements-colab.txt                  # Python dependencies (Colab only)
 ├── README.md                              # This file
 ├── LICENSE                                # License information
 ├── docs/
