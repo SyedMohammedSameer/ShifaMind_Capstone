@@ -1,0 +1,115 @@
+# ============================================================================
+# ShifaMind: Requirements
+# ============================================================================
+#
+# Python package dependencies for the ShifaMind clinical AI system.
+# Install with: pip install -r requirements.txt
+#
+# Author: Mohammed Sameer Syed
+# Institution: University of Arizona
+# Date: November 2025
+# ============================================================================
+
+# Core ML/DL Frameworks
+torch>=2.0.0
+transformers>=4.35.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Medical NLP
+# Note: scispacy requires manual model download after installation
+# Run: python -m spacy download en_core_sci_sm
+scispacy>=0.5.3
+
+# Data Processing
+pandas>=2.0.0
+scikit-learn>=1.3.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.14.0
+
+# Web Interface (for demo)
+gradio>=4.0.0
+
+# Progress Bars & Utilities
+tqdm>=4.65.0
+
+# File I/O
+pickle5>=0.0.11
+h5py>=3.8.0
+
+# JSON Processing
+jsonlines>=3.1.0
+
+# Logging
+coloredlogs>=15.0.1
+
+# Configuration
+pyyaml>=6.0
+
+# Testing (optional)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Jupyter (for notebooks)
+jupyter>=1.0.0
+ipykernel>=6.25.0
+ipywidgets>=8.1.0
+
+# Google Colab Integration (if using Colab)
+# These are typically pre-installed in Colab
+# Uncomment if running locally and need Colab-like features
+# google-colab
+# google-api-python-client>=2.0.0
+
+# UMLS Processing (no special package needed - uses native Python)
+
+# Additional Utilities
+requests>=2.31.0
+pathlib>=1.0.1
+
+# Type Checking (development)
+mypy>=1.5.0
+types-requests>=2.31.0
+
+# Code Formatting (development)
+black>=23.7.0
+flake8>=6.1.0
+
+# ============================================================================
+# Installation Notes
+# ============================================================================
+#
+# 1. Basic Installation:
+#    pip install -r requirements.txt
+#
+# 2. For GPU Support (CUDA):
+#    Ensure you have CUDA installed, then install PyTorch with CUDA support:
+#    pip install torch --index-url https://download.pytorch.org/whl/cu118
+#
+# 3. scispacy Models:
+#    After installing scispacy, download the medical NLP models:
+#    python -m spacy download en_core_sci_sm
+#    python -m spacy download en_core_sci_md  # (optional, larger model)
+#
+# 4. Google Colab:
+#    Most packages are pre-installed. Only install:
+#    !pip install transformers gradio scispacy
+#
+# 5. Development Installation (with testing and formatting tools):
+#    pip install -r requirements.txt
+#    pip install pytest pytest-cov mypy black flake8
+#
+# ============================================================================
+# Version Constraints Explained
+# ============================================================================
+#
+# - PyTorch 2.0.0+: Required for modern features and performance improvements
+# - Transformers 4.35.0+: Needed for Bio_ClinicalBERT model support
+# - Gradio 4.0.0+: Latest UI features and bug fixes
+# - NumPy 1.24.0+: Compatibility with PyTorch 2.0+
+# - Pandas 2.0.0+: Performance improvements and new features
+#
+# ============================================================================
