@@ -1,0 +1,43 @@
+# ============================================================================
+# ShifaMind: Google Colab Requirements
+# ============================================================================
+#
+# Minimal dependencies for Google Colab (most packages are pre-installed)
+# Install with: pip install -r requirements-colab.txt
+#
+# Google Colab already includes:
+# - torch, numpy, pandas, scikit-learn, matplotlib, seaborn
+# - jupyter, ipykernel, tqdm
+# - All CUDA/GPU support
+#
+# We only need to install these additional packages:
+# ============================================================================
+
+# Transformers (for Bio_ClinicalBERT)
+transformers>=4.35.0
+
+# Gradio (for interactive demo)
+gradio>=4.0.0
+
+# Medical NLP
+scispacy>=0.5.3
+
+# Additional utilities not in Colab
+jsonlines>=3.1.0
+plotly>=5.14.0
+
+# ============================================================================
+# Post-Installation Steps
+# ============================================================================
+#
+# After installing, download the spacy medical model:
+# !python -m spacy download en_core_sci_sm
+#
+# ============================================================================
+# Quick Install Command
+# ============================================================================
+#
+# !pip install -q -r requirements-colab.txt
+# !python -m spacy download en_core_sci_sm
+#
+# ============================================================================
