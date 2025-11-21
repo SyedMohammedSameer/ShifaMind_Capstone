@@ -71,9 +71,14 @@ def is_animal_concept(concept_name):
 # CONFIGURATION
 # ============================================================================
 
-BASE_PATH = Path('/content/drive/MyDrive/ShifaMind')
+# Use environment variable if set, otherwise use default path
+BASE_PATH = Path(os.getenv('SHIFAMIND_BASE_PATH', '/content/drive/MyDrive/ShifaMind'))
 CHECKPOINT_PATH = BASE_PATH / '03_Models/checkpoints/shifamind_model.pt'
 KB_PATH = BASE_PATH / '03_Models/clinical_knowledge_base.json'
+
+print(f"📂 Using BASE_PATH: {BASE_PATH}")
+print(f"📦 Looking for model at: {CHECKPOINT_PATH}")
+print(f"📚 Looking for KB at: {KB_PATH}")
 
 TARGET_CODES = ['J189', 'I5023', 'A419', 'K8000']
 CODE_TO_LABEL = {code: i for i, code in enumerate(TARGET_CODES)}
