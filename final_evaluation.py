@@ -56,8 +56,9 @@ print(f"🖥️  Device: {device}")
 # 2. CONFIGURATION - SAME AS 042.py
 # ============================================================================
 
-# Paths
-BASE_PATH = Path('/content/drive/MyDrive/ShifaMind')
+# Paths - Use environment variable if set, otherwise use default
+BASE_PATH = Path(os.getenv('SHIFAMIND_BASE_PATH', '/content/drive/MyDrive/ShifaMind'))
+print(f"📂 Using BASE_PATH: {BASE_PATH}")
 MIMIC_NOTES_PATH = BASE_PATH / '01_Raw_Datasets/Extracted/mimic-iv-note-2.2/note'
 UMLS_META_PATH = BASE_PATH / '01_Raw_Datasets/Extracted/umls-2025AA-metathesaurus-full/2025AA/META'
 ICD10_PATH = BASE_PATH / '01_Raw_Datasets/Extracted/icd10cm-CodesDescriptions-2024'
