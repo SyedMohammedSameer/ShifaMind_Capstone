@@ -152,6 +152,7 @@ print("="*80 + "\n")
 results = {'shifamind': [], 'bioclinbert': [], 'gpt4': []}
 times = {'shifamind': [], 'bioclinbert': [], 'gpt4': []}
 costs = []
+example_predictions = []  # Store 2 examples for qualitative comparison
 
 for i, text in enumerate(tqdm(test_notes), 1):
     # ShifaMind
@@ -160,8 +161,12 @@ for i, text in enumerate(tqdm(test_notes), 1):
     with torch.no_grad():
         outputs = shifamind_model(encoding['input_ids'], encoding['attention_mask'], concept_embeddings)
         probs_sm = torch.sigmoid(outputs['logits']).cpu().numpy()[0]
-    times['shifamind'].append(time.time() - start)
+    time_sm = time.time() - start
+    times['shifamind'].append(time_sm)
     results['shifamind'].append(probs_sm)
+    pred_sm_idx = np.argmax(probs_sm)
+    pred_sm_label = list(ICD_DESCRIPTIONS.values())[pred_sm_idx]
+    conf_sm = probs_sm[pred_sm_idx]
 
     # Bio_ClinicalBERT
     start = time.time()
@@ -171,10 +176,17 @@ for i, text in enumerate(tqdm(test_notes), 1):
         cls_hidden = outputs.last_hidden_state[:, 0, :]
         logits = bert_classifier(cls_hidden)
         probs_bc = torch.sigmoid(logits).cpu().numpy()[0]
-    times['bioclinbert'].append(time.time() - start)
+    time_bc = time.time() - start
+    times['bioclinbert'].append(time_bc)
     results['bioclinbert'].append(probs_bc)
+    pred_bc_idx = np.argmax(probs_bc)
+    pred_bc_label = list(ICD_DESCRIPTIONS.values())[pred_bc_idx]
+    conf_bc = probs_bc[pred_bc_idx]
 
     # GPT-4 (limit to 20 calls to save cost)
+    pred_gpt_label = "N/A"
+    conf_gpt = 0.0
+    time_gpt = 0.0
     if i <= 20:
         prompt = f"""You are a clinical diagnosis AI. Analyze this note and predict the primary diagnosis.
 
@@ -222,9 +234,36 @@ Respond ONLY with JSON:
             times['gpt4'].append(latency)
             results['gpt4'].append(probs_gpt)
             costs.append(cost)
+
+            pred_gpt_label = diagnosis
+            conf_gpt = confidence
+            time_gpt = latency
+
             time.sleep(0.5)
         except Exception as e:
             print(f"GPT Error: {e}")
+
+    # Store first 2 examples for qualitative comparison
+    if i <= 2:
+        example_predictions.append({
+            'example_num': i,
+            'clinical_note': text[:500] + "..." if len(text) > 500 else text,
+            'shifamind': {
+                'prediction': pred_sm_label,
+                'confidence': f"{conf_sm:.1%}",
+                'time': f"{time_sm:.3f}s"
+            },
+            'bioclinbert': {
+                'prediction': pred_bc_label,
+                'confidence': f"{conf_bc:.1%}",
+                'time': f"{time_bc:.3f}s"
+            },
+            'gpt4': {
+                'prediction': pred_gpt_label,
+                'confidence': f"{conf_gpt:.1%}" if pred_gpt_label != "N/A" else "N/A",
+                'time': f"{time_gpt:.3f}s" if pred_gpt_label != "N/A" else "N/A"
+            }
+        })
 
 print("\n✅ Predictions complete\n")
 
@@ -324,6 +363,31 @@ print("✅ model_comparison_table.csv")
 print("\n" + df_summary.to_string(index=False))
 
 # ============================================================================
+# SAVE EXAMPLE PREDICTIONS
+# ============================================================================
+
+print("\nSaving example predictions...")
+with open(OUTPUT_PATH / 'example_predictions.md', 'w') as f:
+    f.write("# ShifaMind Model Comparison - Example Predictions\n\n")
+    f.write("Real clinical notes with predictions from all three models.\n\n")
+    f.write("---\n\n")
+
+    for ex in example_predictions:
+        f.write(f"## Example {ex['example_num']}\n\n")
+        f.write("### Clinical Note:\n\n")
+        f.write(f"```\n{ex['clinical_note']}\n```\n\n")
+        f.write("### Model Predictions:\n\n")
+
+        f.write("| Model | Prediction | Confidence | Inference Time |\n")
+        f.write("|-------|------------|------------|----------------|\n")
+        f.write(f"| **ShifaMind** | {ex['shifamind']['prediction']} | {ex['shifamind']['confidence']} | {ex['shifamind']['time']} |\n")
+        f.write(f"| **Bio_ClinicalBERT** | {ex['bioclinbert']['prediction']} | {ex['bioclinbert']['confidence']} | {ex['bioclinbert']['time']} |\n")
+        f.write(f"| **GPT-4o-mini** | {ex['gpt4']['prediction']} | {ex['gpt4']['confidence']} | {ex['gpt4']['time']} |\n")
+        f.write("\n---\n\n")
+
+print("✅ example_predictions.md")
+
+# ============================================================================
 # SAVE RAW DATA
 # ============================================================================
 
@@ -333,7 +397,8 @@ with open(OUTPUT_PATH / 'comparison_results.json', 'w') as f:
         'n_samples': N_SAMPLES,
         'avg_times': {k: float(np.mean(v)) for k, v in times.items()},
         'total_cost': float(sum(costs)) if costs else 0,
-        'cost_per_1k': float(cost_per_1k) if costs else 0
+        'cost_per_1k': float(cost_per_1k) if costs else 0,
+        'example_predictions': example_predictions
     }, f, indent=2)
 print("✅ comparison_results.json")
 
@@ -344,5 +409,6 @@ print(f"\nAll outputs saved to: {OUTPUT_PATH}")
 print("\nGenerated:")
 print("  📊 4 visualizations (PNG)")
 print("  📋 1 comparison table (CSV)")
+print("  📝 2 example predictions (Markdown)")
 print("  💾 1 raw data file (JSON)")
 print("\n" + "="*80)
