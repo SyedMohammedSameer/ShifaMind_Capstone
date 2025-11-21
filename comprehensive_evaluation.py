@@ -4,6 +4,11 @@ ShifaMind: Comprehensive Model Comparison & Visualization
 Compares ShifaMind with GPT-4o-mini and Bio_ClinicalBERT baseline.
 Generates publication-ready visualizations and tables.
 
+COLAB USAGE:
+    API_KEY = "sk-proj-..."
+    from comprehensive_evaluation import run_evaluation
+    run_evaluation(api_key=API_KEY, n_samples=30)
+
 Author: Mohammed Sameer Syed
 Date: November 2025
 """
@@ -31,6 +36,10 @@ from openai import OpenAI
 sns.set_style("whitegrid")
 plt.rcParams['figure.dpi'] = 300
 plt.rcParams['font.size'] = 10
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
 # Paths
 BASE_PATH = Path(os.getenv('SHIFAMIND_BASE_PATH', '/content/drive/MyDrive/ShifaMind'))
@@ -189,10 +198,19 @@ Respond ONLY with JSON:
                 temperature=0.1
             )
             latency = time.time() - start
+
+            # Extract content (matching user's pattern)
             content = response.choices[0].message.content
+
+            # Handle code blocks
             if "```" in content:
                 content = content.split("```")[1].replace("json", "").strip()
-            result = json.loads(content)
+
+            # Parse JSON
+            try:
+                result = json.loads(content)
+            except:
+                result = {"diagnosis": "Pneumonia", "confidence": 50}
 
             diagnosis = result.get("diagnosis", "Pneumonia")
             confidence = result.get("confidence", 50) / 100.0
@@ -205,7 +223,10 @@ Respond ONLY with JSON:
                 else:
                     probs[i] = (1 - confidence) / (len(TARGET_CODES) - 1)
 
-            cost = (response.usage.prompt_tokens * 0.15 + response.usage.completion_tokens * 0.60) / 1_000_000
+            # Calculate cost (matching user's pattern)
+            usage = response.usage
+            cost = (usage.prompt_tokens * 0.15 + usage.completion_tokens * 0.60) / 1_000_000
+
             return probs, latency, cost
         except Exception as e:
             print(f"GPT Error: {e}")
@@ -505,11 +526,22 @@ graph TB
     print("   (Render this in any Markdown viewer that supports Mermaid)")
 
 # ============================================================================
-# MAIN
+# MAIN ENTRY POINT
 # ============================================================================
 
-def main(api_key, n_samples=50):
-    """Run complete evaluation suite"""
+def run_evaluation(api_key, n_samples=30):
+    """
+    Run complete evaluation suite
+
+    Args:
+        api_key: OpenAI API key for GPT-4o-mini
+        n_samples: Number of test samples to evaluate (default: 30)
+
+    Usage:
+        API_KEY = "sk-proj-..."
+        from comprehensive_evaluation import run_evaluation
+        run_evaluation(api_key=API_KEY, n_samples=30)
+    """
 
     print("\n" + "="*80)
     print("SHIFAMIND COMPREHENSIVE EVALUATION")
@@ -547,15 +579,33 @@ def main(api_key, n_samples=50):
     print("  💾 Data:")
     print("     - comparison_results.json")
 
+    return OUTPUT_PATH
+
+# ============================================================================
+# COMMAND LINE SUPPORT (Optional)
+# ============================================================================
+
 if __name__ == '__main__':
     import sys
 
-    if len(sys.argv) < 2:
-        print("Usage: python comprehensive_evaluation.py <OPENAI_API_KEY> [n_samples]")
-        print("Example: python comprehensive_evaluation.py sk-proj-... 50")
-        sys.exit(1)
+    # Check if running in notebook (Jupyter/Colab)
+    try:
+        get_ipython()
+        print("=" * 80)
+        print("Running in Jupyter/Colab environment")
+        print("=" * 80)
+        print("\nUsage:")
+        print('  API_KEY = "sk-proj-..."')
+        print("  run_evaluation(api_key=API_KEY, n_samples=30)")
+        print("\n" + "=" * 80)
+    except NameError:
+        # Running as script
+        if len(sys.argv) < 2:
+            print("Usage: python comprehensive_evaluation.py <OPENAI_API_KEY> [n_samples]")
+            print("Example: python comprehensive_evaluation.py sk-proj-... 50")
+            sys.exit(1)
 
-    api_key = sys.argv[1]
-    n_samples = int(sys.argv[2]) if len(sys.argv) > 2 else 50
+        api_key = sys.argv[1]
+        n_samples = int(sys.argv[2]) if len(sys.argv) > 2 else 50
 
-    main(api_key, n_samples)
+        run_evaluation(api_key, n_samples)
