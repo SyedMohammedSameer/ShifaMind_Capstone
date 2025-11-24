@@ -39,7 +39,7 @@ ICD10_CODES_PATH = ICD10_PATH / 'icd10cm-codes-2024.txt'
 # Model paths
 MODEL_PATH = BASE_PATH / '03_Models'
 CHECKPOINT_PATH = MODEL_PATH / 'checkpoints'
-KNOWLEDGE_BASE_PATH = MODEL_PATH / 'clinical_knowledge_base.json'
+KNOWLEDGE_BASE_PATH = MODEL_PATH / 'clinical_knowledge_base_final.json'
 
 # Results paths
 RESULTS_PATH = BASE_PATH / '04_Results'
@@ -281,9 +281,9 @@ JSON_INDENT = 2
 # CHECKPOINT NAMES
 # ============================================================================
 
-CHECKPOINT_STAGE1 = CHECKPOINT_PATH / 'shifamind_stage1_diagnosis.pt'
-CHECKPOINT_STAGE2 = CHECKPOINT_PATH / 'shifamind_stage2_concepts.pt'
-CHECKPOINT_FINAL = CHECKPOINT_PATH / 'shifamind_model.pt'  # Final production model
+CHECKPOINT_STAGE1 = CHECKPOINT_PATH / 'shifamind_stage1_diagnosis_final.pt'
+CHECKPOINT_STAGE2 = CHECKPOINT_PATH / 'shifamind_stage2_concepts_final.pt'
+CHECKPOINT_FINAL = CHECKPOINT_PATH / 'shifamind_model_final.pt'  # Final production model
 
 # ============================================================================
 # LOSS FUNCTION WEIGHTS
