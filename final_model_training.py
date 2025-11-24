@@ -764,6 +764,9 @@ def main(args):
     logger.info(f"Output Directory: {args.output_path}")
     logger.info(f"Checkpoint Directory: {CHECKPOINT_PATH}")
 
+    # Initialize best_f1 (will be updated during training if stages run)
+    best_f1 = None
+
     # Validate data
     validate_data_structure()
 
@@ -1253,7 +1256,10 @@ def main(args):
     logger.info(f"   Concepts loaded: {len(umls_concepts)}")
     logger.info(f"   Whitelist concepts: {len(whitelist_concepts)}")
     logger.info(f"   Avg labels/sample: {train_concept_labels.sum(axis=1).mean():.1f}")
-    logger.info(f"   Final F1: {best_f1:.4f}")
+    if best_f1 is not None:
+        logger.info(f"   Final F1: {best_f1:.4f}")
+    else:
+        logger.info(f"   Training skipped (using existing checkpoints)")
     logger.info(f"🎯 Training successful!")
     logger.info(f"   Next: Run final_evaluation.py")
 
