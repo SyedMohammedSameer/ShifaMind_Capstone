@@ -2,13 +2,13 @@
 # CONFIG
 # ======================
 API_KEY = "sk-proj-YOUR_KEY_HERE"   # <---- PUT YOUR OPENAI KEY HERE
-N_SAMPLES = 30  # Number of samples
+N_SAMPLES = 100  # Number of samples to evaluate (increase for better metrics)
 BASE_PATH = "/content/drive/MyDrive/ShifaMind"
 
 # ======================
 # IMPORTS
 # ======================
-import os, json, time, warnings, re
+import os, json, time, warnings, re, pickle
 warnings.filterwarnings('ignore')
 import numpy as np
 import pandas as pd
@@ -21,6 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
 from openai import OpenAI
+from sklearn.metrics import f1_score, roc_auc_score, precision_score, recall_score, confusion_matrix
 
 # Setup
 sns.set_style("whitegrid")
@@ -31,17 +32,22 @@ OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 TARGET_CODES = ['J189', 'I5023', 'A419', 'K8000']
-ICD_DESCRIPTIONS = {'J189': 'Pneumonia', 'I5023': 'Heart Failure', 'A419': 'Sepsis', 'K8000': 'Cholecystitis'}
+ICD_DESCRIPTIONS = {
+    'J189': 'Pneumonia, unspecified organism',
+    'I5023': 'Acute on chronic systolic heart failure',
+    'A419': 'Sepsis, unspecified organism',
+    'K8000': 'Calculus of gallbladder with acute cholecystitis'
+}
 CODE_TO_LABEL = {code: i for i, code in enumerate(TARGET_CODES)}
 LABEL_TO_CODE = {i: code for code, i in CODE_TO_LABEL.items()}
 
 print("="*80)
-print("SHIFAMIND COMPREHENSIVE EVALUATION WITH FULL EXPLAINABILITY")
+print("SHIFAMIND COMPREHENSIVE EVALUATION WITH FULL METRICS")
 print("="*80)
 print(f"Device: {device}\nSamples: {N_SAMPLES}\nOutput: {OUTPUT_PATH}\n")
 
 # ======================
-# MODELS (simplified)
+# MODELS
 # ======================
 class EnhancedCrossAttention(nn.Module):
     def __init__(self, hidden_size, num_heads=8, dropout=0.1):
@@ -51,7 +57,7 @@ class EnhancedCrossAttention(nn.Module):
         self.query, self.key, self.value = nn.Linear(hidden_size, hidden_size), nn.Linear(hidden_size, hidden_size), nn.Linear(hidden_size, hidden_size)
         self.gate = nn.Linear(hidden_size * 2, hidden_size)
         self.dropout, self.layer_norm = nn.Dropout(dropout), nn.LayerNorm(hidden_size)
-    
+
     def forward(self, hidden_states, concept_embeddings, attention_mask=None, return_attention=False):
         B, S, H = hidden_states.shape
         C = concept_embeddings.shape[0]
@@ -78,7 +84,7 @@ class ShifaMindModel(nn.Module):
         self.concept_head = nn.Linear(self.hidden_size, num_concepts)
         self.diagnosis_concept_interaction = nn.Bilinear(num_classes, num_concepts, num_concepts)
         self.dropout = nn.Dropout(0.1)
-    
+
     def forward(self, input_ids, attention_mask, concept_embeddings, return_attention=False):
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
         hidden_states, current_hidden = outputs.hidden_states, outputs.hidden_states[-1]
@@ -101,7 +107,7 @@ class ShifaMindModel(nn.Module):
         return result
 
 print("Loading models...")
-checkpoint = torch.load(BASE_PATH / '03_Models/checkpoints/shifamind_model.pt', map_location=device)
+checkpoint = torch.load(BASE_PATH / '03_Models/checkpoints/shifamind_model_final.pt', map_location=device)
 concept_embeddings = checkpoint['concept_embeddings'].to(device)
 num_concepts, concept_cuis, concept_names = checkpoint['num_concepts'], checkpoint['concept_cuis'], checkpoint['concept_names']
 concept_store = {
@@ -114,7 +120,7 @@ shifamind_model = ShifaMindModel(base_model, num_concepts, len(TARGET_CODES), [9
 shifamind_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
 shifamind_model.eval()
 
-with open(BASE_PATH / '03_Models/clinical_knowledge_base.json', 'r') as f:
+with open(BASE_PATH / '03_Models/clinical_knowledge_base_final.json', 'r') as f:
     knowledge_base = json.load(f)
 
 bert_tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
@@ -152,7 +158,7 @@ def extract_evidence_spans(text, input_ids, attention_weights, concepts, tokeniz
             if len(span_text) > 20:
                 spans.append(span_text)
         unique_spans = list(dict.fromkeys(spans))[:2]
-        evidence_chains.append({'concept': concept['name'], 'cui': concept.get('cui', 'UNKNOWN'), 
+        evidence_chains.append({'concept': concept['name'], 'cui': concept.get('cui', 'UNKNOWN'),
                                 'score': float(concept['score']), 'evidence_spans': unique_spans})
     return evidence_chains
 
@@ -175,15 +181,58 @@ def retrieve_clinical_knowledge(diagnosis_code, concepts, kb, top_k=2):
     return [{'text': entry['text'], 'source': entry['source'], 'type': entry['type']}
             for score, entry in scored_entries[:top_k] if score > 0]
 
+def calculate_calibration_error(y_true, y_pred_probs, n_bins=10):
+    """Calculate Expected Calibration Error (ECE)"""
+    bin_boundaries = np.linspace(0, 1, n_bins + 1)
+    bin_lowers = bin_boundaries[:-1]
+    bin_uppers = bin_boundaries[1:]
+
+    ece = 0.0
+    for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
+        in_bin = (y_pred_probs > bin_lower) & (y_pred_probs <= bin_upper)
+        prop_in_bin = in_bin.mean()
+        if prop_in_bin > 0:
+            accuracy_in_bin = y_true[in_bin].mean()
+            avg_confidence_in_bin = y_pred_probs[in_bin].mean()
+            ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+    return ece
+
 # ======================
-# LOAD TEST DATA
+# LOAD TEST DATA WITH GROUND TRUTH
 # ======================
-print("Loading test data...")
-notes_path = BASE_PATH / "01_Raw_Datasets/Extracted/mimic-iv-note-2.2/note/discharge.csv.gz"
-df = pd.read_csv(notes_path, compression="gzip", nrows=500, on_bad_lines="skip")
-df = df[df["text"].str.len() > 500].sample(n=N_SAMPLES, random_state=42).reset_index(drop=True)
-test_notes = df['text'].tolist()
-print(f"✅ Loaded {len(test_notes)} test notes\n")
+print("Loading test data with ground truth labels...")
+test_cache_path = BASE_PATH / '04_Results/experiments/training_run/test_data_cache.pkl'
+
+if test_cache_path.exists():
+    with open(test_cache_path, 'rb') as f:
+        test_cache = pickle.load(f)
+    df_test = test_cache['df_test']
+    test_concept_labels = test_cache['test_concept_labels']
+
+    # Sample N_SAMPLES from test set
+    if len(df_test) > N_SAMPLES:
+        sample_indices = np.random.choice(len(df_test), N_SAMPLES, replace=False)
+        df_test = df_test.iloc[sample_indices].reset_index(drop=True)
+        test_concept_labels = test_concept_labels[sample_indices]
+
+    test_notes = df_test['text'].tolist()
+    y_true = []
+    for _, row in df_test.iterrows():
+        label = [0] * len(TARGET_CODES)
+        for code in TARGET_CODES:
+            if code in row['icd_codes']:
+                label[CODE_TO_LABEL[code]] = 1
+        y_true.append(label)
+    y_true = np.array(y_true)
+
+    print(f"✅ Loaded {len(test_notes)} test notes with ground truth labels")
+    print(f"   Label distribution: {y_true.sum(axis=0)}")
+else:
+    print("⚠️  Warning: test_data_cache.pkl not found. Metrics will not be computed.")
+    print("   Run final_model_training.py first to generate test cache.")
+    exit(1)
+
+print()
 
 # ======================
 # RUN PREDICTIONS WITH FULL EXPLAINABILITY
@@ -192,113 +241,136 @@ print("Running predictions...")
 print("="*80 + "\n")
 
 results = {'shifamind': [], 'bioclinbert': [], 'gpt4': []}
+predictions_probs = {'shifamind': [], 'bioclinbert': [], 'gpt4': []}
 times = {'shifamind': [], 'bioclinbert': [], 'gpt4': []}
 costs, example_predictions = [], []
 
-for i, text in enumerate(tqdm(test_notes), 1):
+# Track explainability metrics for ShifaMind
+shifamind_concepts_per_diagnosis = []
+shifamind_has_evidence = []
+
+for i, (text, true_label) in enumerate(tqdm(list(zip(test_notes, y_true)), desc="Evaluating"), 1):
     # === SHIFAMIND - FULL EXPLAINABILITY ===
     start = time.time()
-    encoding = tokenizer(text, padding='max_length', truncation=True, max_length=384, return_tensors='pt').to(device)
+    encoded = tokenizer(text[:2000], return_tensors='pt', padding='max_length', truncation=True, max_length=384).to(device)
     with torch.no_grad():
-        outputs = shifamind_model(encoding['input_ids'], encoding['attention_mask'], concept_embeddings, return_attention=True)
-        probs_sm = torch.sigmoid(outputs['logits']).cpu().numpy()[0]
-        concept_scores = torch.sigmoid(outputs['concept_scores']).cpu().numpy()[0]
+        output = shifamind_model(encoded['input_ids'], encoded['attention_mask'], concept_embeddings, return_attention=True)
+
+    probs_sm = torch.sigmoid(output['logits']).cpu().numpy()[0]
+    pred_label_sm = int(np.argmax(probs_sm))
+    conf_sm = float(probs_sm[pred_label_sm])
+    pred_code_sm = LABEL_TO_CODE[pred_label_sm]
     time_sm = time.time() - start
-    times['shifamind'].append(time_sm)
-    results['shifamind'].append(probs_sm)
-    
-    pred_sm_idx = np.argmax(probs_sm)
-    pred_sm_code = LABEL_TO_CODE[pred_sm_idx]
-    pred_sm_label, conf_sm = ICD_DESCRIPTIONS[pred_sm_code], probs_sm[pred_sm_idx]
-    
+
     # Extract concepts
-    all_indices = np.argsort(concept_scores)[::-1]
-    concepts = []
-    for idx in all_indices[:10]:
-        cui = concept_store['idx_to_concept'].get(idx, f'CUI_{idx}')
-        concept_info = concept_store['concepts'].get(cui, {})
-        concept_name = concept_info.get('preferred_name', f'Concept_{idx}')
-        concepts.append({'idx': idx, 'cui': cui, 'name': concept_name, 'score': float(concept_scores[idx])})
-    
-    # Extract evidence and knowledge (for first 2 examples)
-    evidence_chains, clinical_knowledge = [], []
-    if i <= 2:
-        evidence_chains = extract_evidence_spans(text, encoding['input_ids'][0], outputs['attention_weights'], concepts, tokenizer, top_k=5)
-        clinical_knowledge = retrieve_clinical_knowledge(pred_sm_code, concepts, knowledge_base, top_k=2)
-    
-    # === BIO_CLINICALBERT - BASELINE ===
+    concept_scores = torch.sigmoid(output['concept_scores']).cpu().numpy()[0]
+    top_concept_indices = np.argsort(concept_scores)[::-1][:10]
+    top_concepts = []
+    for idx in top_concept_indices:
+        cui = concept_store['idx_to_concept'][idx]
+        name = concept_store['concepts'][cui]['preferred_name']
+        score = float(concept_scores[idx])
+        top_concepts.append({'idx': int(idx), 'cui': cui, 'name': name, 'score': score})
+
+    # Evidence spans
+    evidence_chains = extract_evidence_spans(text[:2000], encoded['input_ids'][0], output['attention_weights'], top_concepts, tokenizer, top_k=5)
+
+    # Clinical knowledge
+    clinical_knowledge = retrieve_clinical_knowledge(pred_code_sm, top_concepts, knowledge_base, top_k=3)
+
+    results['shifamind'].append(probs_sm)
+    predictions_probs['shifamind'].append(probs_sm)
+    times['shifamind'].append(time_sm)
+
+    # Track explainability metrics
+    shifamind_concepts_per_diagnosis.append(len(top_concepts))
+    shifamind_has_evidence.append(1 if evidence_chains else 0)
+
+    # === BIO_CLINICALBERT BASELINE ===
     start = time.time()
-    encoding_bert = bert_tokenizer(text, padding='max_length', truncation=True, max_length=384, return_tensors='pt').to(device)
+    encoded_bert = bert_tokenizer(text[:2000], return_tensors='pt', padding='max_length', truncation=True, max_length=384).to(device)
     with torch.no_grad():
-        outputs_bert = bert_model(**encoding_bert)
-        logits = bert_classifier(outputs_bert.last_hidden_state[:, 0, :])
-        probs_bc = torch.sigmoid(logits).cpu().numpy()[0]
-    time_bc = time.time() - start
-    times['bioclinbert'].append(time_bc)
-    results['bioclinbert'].append(probs_bc)
-    pred_bc_idx, pred_bc_label, conf_bc = np.argmax(probs_bc), list(ICD_DESCRIPTIONS.values())[np.argmax(probs_bc)], probs_bc[np.argmax(probs_bc)]
+        bert_output = bert_model(**encoded_bert)
+        bert_logits = bert_classifier(bert_output.pooler_output)
+    probs_bert = torch.sigmoid(bert_logits).cpu().numpy()[0]
+    pred_label_bert = int(np.argmax(probs_bert))
+    conf_bert = float(probs_bert[pred_label_bert])
+    pred_code_bert = LABEL_TO_CODE[pred_label_bert]
+    time_bert = time.time() - start
 
-    # === GPT-4 - API ===
-    pred_gpt_label, conf_gpt, time_gpt = "N/A", 0.0, 0.0
-    if i <= 20:
-        prompt = f"""You are a clinical diagnosis AI. Analyze this note and predict the primary diagnosis.
+    results['bioclinbert'].append(probs_bert)
+    predictions_probs['bioclinbert'].append(probs_bert)
+    times['bioclinbert'].append(time_bert)
 
-Clinical Note:
-{text[:2000]}
+    # === GPT-4O-MINI ===
+    try:
+        start = time.time()
+        prompt = f"""You are a medical diagnosis assistant. Given this discharge summary, predict ONE primary diagnosis from these options:
+- J189: Pneumonia
+- I5023: Heart Failure
+- A419: Sepsis
+- K8000: Cholecystitis
 
-Respond ONLY with JSON:
-{{
-  "diagnosis": "Pneumonia" or "Heart Failure" or "Sepsis" or "Cholecystitis",
-  "confidence": 0-100
-}}"""
-        try:
-            start = time.time()
-            response = gpt_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=100, temperature=0.1)
-            latency = time.time() - start
-            content = response.choices[0].message.content
-            if "```" in content:
-                content = content.split("```")[1].replace("json", "").strip()
-            try:
-                result = json.loads(content)
-            except:
-                result = {"diagnosis": "Pneumonia", "confidence": 50}
-            diagnosis, confidence = result.get("diagnosis", "Pneumonia"), result.get("confidence", 50) / 100.0
-            probs_gpt = np.zeros(len(TARGET_CODES))
-            for j, desc in enumerate(ICD_DESCRIPTIONS.values()):
-                probs_gpt[j] = confidence if desc == diagnosis else (1 - confidence) / (len(TARGET_CODES) - 1)
-            usage = response.usage
-            cost = (usage.prompt_tokens * 0.15 + usage.completion_tokens * 0.60) / 1_000_000
-            times['gpt4'].append(latency)
-            results['gpt4'].append(probs_gpt)
-            costs.append(cost)
-            pred_gpt_label, conf_gpt, time_gpt = diagnosis, confidence, latency
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"GPT Error: {e}")
+Discharge Summary:
+{text[:1500]}
 
-    # Store first 2 examples with FULL ShifaMind explainability
+Respond with ONLY the ICD-10 code and confidence (0-100%). Format: CODE CONFIDENCE%
+Example: J189 85%"""
+
+        response = gpt_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}],
+                                                        max_tokens=50, temperature=0.3)
+        result_text = response.choices[0].message.content.strip()
+        time_gpt = time.time() - start
+
+        # Parse response
+        match = re.search(r'([IJKA]\d+)\s+(\d+)%', result_text)
+        if match:
+            pred_code_gpt = match.group(1)
+            conf_gpt = float(match.group(2)) / 100.0
+            pred_label_gpt = CODE_TO_LABEL.get(pred_code_gpt, -1)
+            if pred_label_gpt >= 0:
+                probs_gpt = np.zeros(len(TARGET_CODES))
+                probs_gpt[pred_label_gpt] = conf_gpt
+                results['gpt4'].append(probs_gpt)
+                predictions_probs['gpt4'].append(probs_gpt)
+            else:
+                results['gpt4'].append(np.zeros(len(TARGET_CODES)))
+                predictions_probs['gpt4'].append(np.zeros(len(TARGET_CODES)))
+        else:
+            results['gpt4'].append(np.zeros(len(TARGET_CODES)))
+            predictions_probs['gpt4'].append(np.zeros(len(TARGET_CODES)))
+
+        times['gpt4'].append(time_gpt)
+        costs.append(0.00015 * len(text.split()) / 1000 + 0.0006 * 50 / 1000)
+    except Exception as e:
+        results['gpt4'].append(np.zeros(len(TARGET_CODES)))
+        predictions_probs['gpt4'].append(np.zeros(len(TARGET_CODES)))
+        times['gpt4'].append(0)
+
+    # Save first 2 examples for detailed output
     if i <= 2:
         example_predictions.append({
             'example_num': i,
-            'clinical_note': text[:800] + "..." if len(text) > 800 else text,
+            'clinical_note': text[:500] + "...",
+            'ground_truth': [LABEL_TO_CODE[idx] for idx, val in enumerate(true_label) if val == 1],
             'shifamind': {
-                'prediction': pred_sm_label,
+                'prediction': f"{pred_code_sm} - {ICD_DESCRIPTIONS[pred_code_sm]}",
                 'confidence': f"{conf_sm:.1%}",
                 'time': f"{time_sm:.3f}s",
-                'top_concepts': [{'name': c['name'], 'score': f"{c['score']:.1%}"} for c in concepts[:5]],
+                'top_concepts': top_concepts[:5],
                 'evidence_chains': evidence_chains[:3],
                 'clinical_knowledge': clinical_knowledge
             },
             'bioclinbert': {
-                'prediction': pred_bc_label,
-                'confidence': f"{conf_bc:.1%}",
-                'time': f"{time_bc:.3f}s",
-                'explainability': "❌ None - Black box model"
+                'prediction': f"{pred_code_bert} - {ICD_DESCRIPTIONS[pred_code_bert]}",
+                'confidence': f"{conf_bert:.1%}",
+                'time': f"{time_bert:.3f}s",
+                'explainability': "❌ No explainability (black box)"
             },
             'gpt4': {
-                'prediction': pred_gpt_label,
-                'confidence': f"{conf_gpt:.1%}" if pred_gpt_label != "N/A" else "N/A",
-                'time': f"{time_gpt:.3f}s" if pred_gpt_label != "N/A" else "N/A",
+                'prediction': f"{pred_code_gpt} - {ICD_DESCRIPTIONS.get(pred_code_gpt, 'Unknown')}" if 'pred_code_gpt' in locals() else "N/A",
+                'confidence': f"{conf_gpt:.1%}" if 'conf_gpt' in locals() else "N/A",
+                'time': f"{time_gpt:.3f}s" if 'time_gpt' in locals() else "N/A",
                 'explainability': "⚠️  Basic text generation only"
             }
         })
@@ -306,18 +378,211 @@ Respond ONLY with JSON:
 print("\n✅ Predictions complete\n")
 
 # ======================
-# VISUALIZATIONS (same as before)
+# COMPUTE COMPREHENSIVE METRICS
 # ======================
-print("Generating visualizations...")
+print("="*80)
+print("COMPUTING COMPREHENSIVE METRICS")
+print("="*80)
 
-# 1. Inference Time
-fig, ax = plt.subplots(figsize=(10, 6))
-models = ['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini']
-avg_times = [np.mean(times['shifamind']), np.mean(times['bioclinbert']), np.mean(times['gpt4']) if times['gpt4'] else 0]
+# Convert to numpy arrays
+y_pred_shifamind = np.array(predictions_probs['shifamind'])
+y_pred_bioclinbert = np.array(predictions_probs['bioclinbert'])
+y_pred_gpt4 = np.array(predictions_probs['gpt4'])
+
+# Predictions (binary)
+y_pred_binary_sm = (y_pred_shifamind > 0.5).astype(int)
+y_pred_binary_bc = (y_pred_bioclinbert > 0.5).astype(int)
+y_pred_binary_gpt = (y_pred_gpt4 > 0.5).astype(int)
+
+# === CORE METRICS ===
+metrics_summary = {}
+
+for model_name, y_pred_binary, y_pred_probs in [
+    ('ShifaMind', y_pred_binary_sm, y_pred_shifamind),
+    ('Bio_ClinicalBERT', y_pred_binary_bc, y_pred_bioclinbert),
+    ('GPT-4o-mini', y_pred_binary_gpt, y_pred_gpt4)
+]:
+    # Macro F1
+    macro_f1 = f1_score(y_true, y_pred_binary, average='macro', zero_division=0)
+
+    # Micro F1
+    micro_f1 = f1_score(y_true, y_pred_binary, average='micro', zero_division=0)
+
+    # AUROC (only if we have positive samples for each class)
+    try:
+        auroc = roc_auc_score(y_true, y_pred_probs, average='macro')
+    except:
+        auroc = 0.0
+
+    # Per-diagnosis F1
+    per_diag_f1 = {}
+    for idx, code in enumerate(TARGET_CODES):
+        f1 = f1_score(y_true[:, idx], y_pred_binary[:, idx], zero_division=0)
+        per_diag_f1[code] = f1
+
+    metrics_summary[model_name] = {
+        'Macro F1': macro_f1,
+        'Micro F1': micro_f1,
+        'AUROC': auroc,
+        'Per-diagnosis F1': per_diag_f1
+    }
+
+# === EXPLAINABILITY METRICS (ShifaMind only) ===
+# Citation Completeness: % of predictions with evidence
+citation_completeness = np.mean(shifamind_has_evidence)
+
+# Avg Concepts per Diagnosis
+avg_concepts_per_diagnosis = np.mean(shifamind_concepts_per_diagnosis)
+
+# Calibration Error
+y_pred_conf = y_pred_shifamind.max(axis=1)
+y_true_conf = y_true[np.arange(len(y_true)), y_pred_shifamind.argmax(axis=1)]
+calibration_error = calculate_calibration_error(y_true_conf, y_pred_conf, n_bins=10)
+
+explainability_metrics = {
+    'Citation Completeness': citation_completeness,
+    'Avg Concepts/Diagnosis': avg_concepts_per_diagnosis,
+    'Calibration Error (ECE)': calibration_error
+}
+
+# Print metrics
+print("\n" + "="*80)
+print("📊 CORE METRICS COMPARISON")
+print("="*80)
+print(f"\n{'Model':<25} {'Macro F1':<12} {'Micro F1':<12} {'AUROC':<12}")
+print("-" * 61)
+for model_name in ['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini']:
+    m = metrics_summary[model_name]
+    print(f"{model_name:<25} {m['Macro F1']:<12.4f} {m['Micro F1']:<12.4f} {m['AUROC']:<12.4f}")
+
+print("\n" + "="*80)
+print("🔬 SHIFAMIND EXPLAINABILITY METRICS")
+print("="*80)
+print(f"Citation Completeness:     {explainability_metrics['Citation Completeness']:.2%}")
+print(f"Avg Concepts/Diagnosis:    {explainability_metrics['Avg Concepts/Diagnosis']:.1f}")
+print(f"Calibration Error (ECE):   {explainability_metrics['Calibration Error (ECE)']:.4f}")
+
+print("\n" + "="*80)
+print("📈 PER-DIAGNOSIS F1 SCORES (ShifaMind)")
+print("="*80)
+for code in TARGET_CODES:
+    f1 = metrics_summary['ShifaMind']['Per-diagnosis F1'][code]
+    print(f"{code} ({ICD_DESCRIPTIONS[code]:<50}): {f1:.4f}")
+
+print()
+
+# ======================
+# SAVE METRICS
+# ======================
+print("Saving comprehensive metrics...")
+
+# Save to CSV
+metrics_df = pd.DataFrame({
+    'Model': ['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini'],
+    'Macro F1': [metrics_summary[m]['Macro F1'] for m in ['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini']],
+    'Micro F1': [metrics_summary[m]['Micro F1'] for m in ['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini']],
+    'AUROC': [metrics_summary[m]['AUROC'] for m in ['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini']],
+    'Avg Inference Time (s)': [np.mean(times['shifamind']), np.mean(times['bioclinbert']),
+                                 np.mean(times['gpt4']) if times['gpt4'] else 0]
+})
+metrics_df.to_csv(OUTPUT_PATH / 'comprehensive_metrics.csv', index=False)
+print("✅ comprehensive_metrics.csv")
+
+# Save explainability metrics
+explainability_df = pd.DataFrame({
+    'Metric': ['Citation Completeness', 'Avg Concepts/Diagnosis', 'Calibration Error (ECE)'],
+    'Value': [explainability_metrics['Citation Completeness'],
+              explainability_metrics['Avg Concepts/Diagnosis'],
+              explainability_metrics['Calibration Error (ECE)']]
+})
+explainability_df.to_csv(OUTPUT_PATH / 'shifamind_explainability_metrics.csv', index=False)
+print("✅ shifamind_explainability_metrics.csv")
+
+# Save per-diagnosis F1
+per_diag_df = pd.DataFrame({
+    'Diagnosis Code': TARGET_CODES,
+    'Description': [ICD_DESCRIPTIONS[c] for c in TARGET_CODES],
+    'F1 Score': [metrics_summary['ShifaMind']['Per-diagnosis F1'][c] for c in TARGET_CODES]
+})
+per_diag_df.to_csv(OUTPUT_PATH / 'shifamind_per_diagnosis_f1.csv', index=False)
+print("✅ shifamind_per_diagnosis_f1.csv")
+
+# ======================
+# VISUALIZATIONS
+# ======================
+print("\nGenerating visualizations...")
+
+# 1. Metrics Comparison Bar Chart
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+model_names = ['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini']
 colors = ['#2ecc71', '#3498db', '#e74c3c']
-bars = ax.bar(models, avg_times, color=colors, alpha=0.8, edgecolor='black')
+
+for idx, (metric, ax) in enumerate(zip(['Macro F1', 'Micro F1', 'AUROC'], axes)):
+    values = [metrics_summary[m][metric] for m in model_names]
+    bars = ax.bar(model_names, values, color=colors, alpha=0.8, edgecolor='black')
+    for bar, val in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=11)
+    ax.set_ylabel(metric, fontsize=12, fontweight='bold')
+    ax.set_title(f'{metric} Comparison', fontsize=13, fontweight='bold', pad=15)
+    ax.set_ylim(0, 1.1)
+    ax.grid(axis='y', alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(OUTPUT_PATH / 'metrics_comparison.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✅ metrics_comparison.png")
+
+# 2. Per-Diagnosis F1 Scores
+fig, ax = plt.subplots(figsize=(12, 6))
+diagnosis_labels = [f"{code}\n{ICD_DESCRIPTIONS[code][:20]}" for code in TARGET_CODES]
+f1_scores = [metrics_summary['ShifaMind']['Per-diagnosis F1'][c] for c in TARGET_CODES]
+bars = ax.bar(diagnosis_labels, f1_scores, color='#2ecc71', alpha=0.8, edgecolor='black')
+for bar, score in zip(bars, f1_scores):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+            f'{score:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=11)
+ax.set_ylabel('F1 Score', fontsize=12, fontweight='bold')
+ax.set_title('ShifaMind: Per-Diagnosis F1 Scores', fontsize=14, fontweight='bold', pad=20)
+ax.set_ylim(0, 1.1)
+ax.grid(axis='y', alpha=0.3)
+plt.tight_layout()
+plt.savefig(OUTPUT_PATH / 'per_diagnosis_f1.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✅ per_diagnosis_f1.png")
+
+# 3. Explainability Metrics
+fig, ax = plt.subplots(figsize=(10, 6))
+expl_metrics = ['Citation\nCompleteness', 'Avg Concepts\nper Diagnosis', 'Calibration\nError (ECE)']
+expl_values = [explainability_metrics['Citation Completeness'],
+               explainability_metrics['Avg Concepts/Diagnosis'] / 20,  # Normalize to 0-1
+               explainability_metrics['Calibration Error (ECE)']]
+expl_colors = ['#27ae60', '#3498db', '#e67e22']
+bars = ax.bar(expl_metrics, expl_values, color=expl_colors, alpha=0.8, edgecolor='black')
+
+# Add actual values on bars
+labels_actual = [f"{explainability_metrics['Citation Completeness']:.1%}",
+                f"{explainability_metrics['Avg Concepts/Diagnosis']:.1f}",
+                f"{explainability_metrics['Calibration Error (ECE)']:.4f}"]
+for bar, label in zip(bars, labels_actual):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+            label, ha='center', va='bottom', fontweight='bold', fontsize=11)
+
+ax.set_ylabel('Metric Value (normalized)', fontsize=12, fontweight='bold')
+ax.set_title('ShifaMind: Explainability Metrics', fontsize=14, fontweight='bold', pad=20)
+ax.set_ylim(0, 1.2)
+ax.grid(axis='y', alpha=0.3)
+plt.tight_layout()
+plt.savefig(OUTPUT_PATH / 'explainability_metrics.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✅ explainability_metrics.png")
+
+# 4. Inference Time Comparison
+fig, ax = plt.subplots(figsize=(10, 6))
+avg_times = [np.mean(times['shifamind']), np.mean(times['bioclinbert']), np.mean(times['gpt4']) if times['gpt4'] else 0]
+bars = ax.bar(model_names, avg_times, color=colors, alpha=0.8, edgecolor='black')
 for bar, time_val in zip(bars, avg_times):
-    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, f'{time_val:.3f}s', ha='center', va='bottom', fontweight='bold')
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, f'{time_val:.3f}s',
+            ha='center', va='bottom', fontweight='bold')
 ax.set_ylabel('Average Inference Time (seconds)', fontsize=12, fontweight='bold')
 ax.set_title('Inference Speed Comparison', fontsize=14, fontweight='bold', pad=20)
 ax.set_ylim(0, max(avg_times) * 1.2)
@@ -325,78 +590,6 @@ plt.tight_layout()
 plt.savefig(OUTPUT_PATH / 'inference_time_comparison.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("✅ inference_time_comparison.png")
-
-# 2. Cost
-fig, ax = plt.subplots(figsize=(10, 6))
-total_cost_gpt = sum(costs) if costs else 0
-cost_per_1k = (total_cost_gpt / len(costs) * 1000) if costs else 0
-models_cost = ['ShifaMind\n(Local)', 'Bio_ClinicalBERT\n(Local)', f'GPT-4o-mini\n(${cost_per_1k:.2f}/1k)']
-cost_values = [0, 0, cost_per_1k]
-bars = ax.bar(models_cost, cost_values, color=colors, alpha=0.8, edgecolor='black')
-for i, bar in enumerate(bars):
-    if i < 2:
-        ax.text(bar.get_x() + bar.get_width()/2, 0.01, 'FREE', ha='center', va='bottom', fontweight='bold', fontsize=12)
-    else:
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.05, f'${cost_values[i]:.2f}', ha='center', va='bottom', fontweight='bold')
-ax.set_ylabel('Cost per 1000 Predictions ($)', fontsize=12, fontweight='bold')
-ax.set_title('Cost Comparison', fontsize=14, fontweight='bold', pad=20)
-ax.set_ylim(0, max(cost_values) * 1.3 if max(cost_values) > 0 else 1)
-plt.tight_layout()
-plt.savefig(OUTPUT_PATH / 'cost_comparison.png', dpi=300, bbox_inches='tight')
-plt.close()
-print("✅ cost_comparison.png")
-
-# 3. Confidence Distribution
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-for idx, (model, ax) in enumerate(zip(['shifamind', 'bioclinbert', 'gpt4'], axes)):
-    if results[model]:
-        confidences = [np.max(pred) for pred in results[model]]
-        ax.hist(confidences, bins=20, color=colors[idx], alpha=0.7, edgecolor='black')
-        ax.axvline(np.mean(confidences), color='red', linestyle='--', linewidth=2, label=f'Mean: {np.mean(confidences):.2f}')
-        ax.set_xlabel('Prediction Confidence', fontweight='bold')
-        ax.set_ylabel('Frequency', fontweight='bold')
-        ax.set_title(['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini'][idx], fontweight='bold')
-        ax.legend()
-plt.tight_layout()
-plt.savefig(OUTPUT_PATH / 'confidence_distributions.png', dpi=300, bbox_inches='tight')
-plt.close()
-print("✅ confidence_distributions.png")
-
-# 4. Capabilities Matrix
-fig, ax = plt.subplots(figsize=(12, 8))
-capabilities = ['Diagnosis Prediction', 'Confidence Scores', 'Medical Concept Extraction', 'Evidence Spans',
-                'Clinical Knowledge Retrieval', 'Offline Operation', 'HIPAA Compliant', 'Explainability']
-matrix = np.array([[1,1,1], [1,1,1], [1,0,0], [1,0,0], [1,0,0], [1,1,0], [1,1,0], [1,0,0]])
-im = ax.imshow(matrix, cmap='RdYlGn', aspect='auto', vmin=0, vmax=1)
-ax.set_xticks(np.arange(3))
-ax.set_yticks(np.arange(len(capabilities)))
-ax.set_xticklabels(['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini'], fontweight='bold')
-ax.set_yticklabels(capabilities)
-for i in range(len(capabilities)):
-    for j in range(3):
-        ax.text(j, i, '✓' if matrix[i, j] == 1 else '✗', ha="center", va="center", color="black", fontsize=16, fontweight='bold')
-ax.set_title('Model Capabilities Comparison', fontsize=14, fontweight='bold', pad=20)
-plt.tight_layout()
-plt.savefig(OUTPUT_PATH / 'capabilities_matrix.png', dpi=300, bbox_inches='tight')
-plt.close()
-print("✅ capabilities_matrix.png")
-
-# ======================
-# COMPARISON TABLE
-# ======================
-print("\nGenerating comparison table...")
-summary_data = {
-    'Model': ['ShifaMind', 'Bio_ClinicalBERT', 'GPT-4o-mini'],
-    'Avg Inference Time (s)': [f"{np.mean(times['shifamind']):.3f}", f"{np.mean(times['bioclinbert']):.3f}",
-                                 f"{np.mean(times['gpt4']):.3f}" if times['gpt4'] else 'N/A'],
-    'Cost per 1k Calls': ['$0.00', '$0.00', f"${cost_per_1k:.2f}" if costs else 'N/A'],
-    'Explainability': ['High (Concepts+Evidence+Knowledge)', 'None', 'Low (Text only)'],
-    'Offline Capable': ['Yes', 'Yes', 'No']
-}
-df_summary = pd.DataFrame(summary_data)
-df_summary.to_csv(OUTPUT_PATH / 'model_comparison_table.csv', index=False)
-print("✅ model_comparison_table.csv")
-print("\n" + df_summary.to_string(index=False))
 
 # ======================
 # SAVE EXAMPLE PREDICTIONS WITH FULL EXPLAINABILITY
@@ -411,19 +604,20 @@ with open(OUTPUT_PATH / 'example_predictions_detailed.md', 'w') as f:
         f.write(f"## Example {ex['example_num']}\n\n")
         f.write("### Clinical Note:\n\n")
         f.write(f"```\n{ex['clinical_note']}\n```\n\n")
+        f.write(f"**Ground Truth:** {', '.join(ex['ground_truth'])}\n\n")
         f.write("---\n\n")
-        
+
         f.write("### 🤖 ShifaMind Prediction (WITH FULL EXPLAINABILITY)\n\n")
         sm = ex['shifamind']
         f.write(f"**Diagnosis:** {sm['prediction']}\n\n")
         f.write(f"**Confidence:** {sm['confidence']}\n\n")
         f.write(f"**Inference Time:** {sm['time']}\n\n")
-        
+
         f.write("#### 🔬 Top Medical Concepts Extracted:\n\n")
         for i, concept in enumerate(sm['top_concepts'], 1):
-            f.write(f"{i}. **{concept['name']}** ({concept['score']})\n")
+            f.write(f"{i}. **{concept['name']}** ({concept['score']:.2%})\n")
         f.write("\n")
-        
+
         if sm['evidence_chains']:
             f.write("#### 📋 Evidence Chains (Supporting Quotes from Text):\n\n")
             for chain in sm['evidence_chains']:
@@ -433,16 +627,16 @@ with open(OUTPUT_PATH / 'example_predictions_detailed.md', 'w') as f:
                         f.write(f"> \"{span}\"\n\n")
                 else:
                     f.write("> *(No direct text evidence)*\n\n")
-        
+
         if sm['clinical_knowledge']:
             f.write("#### 📚 Clinical Knowledge Retrieved:\n\n")
             for i, kb_entry in enumerate(sm['clinical_knowledge'], 1):
                 f.write(f"{i}. **{kb_entry['type'].replace('_', ' ').title()}**\n\n")
                 f.write(f"   {kb_entry['text']}\n\n")
                 f.write(f"   *Source: {kb_entry['source']}*\n\n")
-        
+
         f.write("---\n\n")
-        
+
         f.write("### 🔵 Bio_ClinicalBERT Prediction (BASELINE)\n\n")
         bc = ex['bioclinbert']
         f.write(f"**Diagnosis:** {bc['prediction']}\n\n")
@@ -450,7 +644,7 @@ with open(OUTPUT_PATH / 'example_predictions_detailed.md', 'w') as f:
         f.write(f"**Inference Time:** {bc['time']}\n\n")
         f.write(f"**Explainability:** {bc['explainability']}\n\n")
         f.write("---\n\n")
-        
+
         f.write("### 🔴 GPT-4o-mini Prediction (API)\n\n")
         gpt = ex['gpt4']
         f.write(f"**Diagnosis:** {gpt['prediction']}\n\n")
@@ -458,46 +652,23 @@ with open(OUTPUT_PATH / 'example_predictions_detailed.md', 'w') as f:
         f.write(f"**Inference Time:** {gpt['time']}\n\n")
         f.write(f"**Explainability:** {gpt['explainability']}\n\n")
         f.write("\n---\n\n")
-        f.write("### 💡 Key Insights:\n\n")
-        f.write("✅ **ShifaMind provides:**\n")
-        f.write("- Medical concepts extracted from ontologies\n")
-        f.write("- Evidence spans showing WHY each concept was identified\n")
-        f.write("- Clinical knowledge retrieval for educational context\n")
-        f.write("- Full traceability from text → concepts → diagnosis\n\n")
-        f.write("❌ **Bio_ClinicalBERT provides:**\n")
-        f.write("- Only diagnosis label + confidence (black box)\n\n")
-        f.write("⚠️  **GPT-4o-mini provides:**\n")
-        f.write("- Diagnosis via text generation (no structured explainability)\n\n")
-        f.write("---\n\n")
 
 print("✅ example_predictions_detailed.md")
 
 # ======================
-# SAVE RAW DATA
+# FINAL SUMMARY
 # ======================
-print("\nSaving raw results...")
-with open(OUTPUT_PATH / 'comparison_results.json', 'w') as f:
-    json.dump({
-        'n_samples': N_SAMPLES,
-        'avg_times': {k: float(np.mean(v)) for k, v in times.items()},
-        'total_cost': float(sum(costs)) if costs else 0,
-        'cost_per_1k': float(cost_per_1k) if costs else 0,
-        'example_predictions': example_predictions
-    }, f, indent=2)
-print("✅ comparison_results.json")
-
 print("\n" + "="*80)
-print("✅ EVALUATION COMPLETE")
+print("✅ COMPREHENSIVE EVALUATION COMPLETE")
 print("="*80)
 print(f"\nAll outputs saved to: {OUTPUT_PATH}")
-print("\nGenerated:")
-print("  📊 4 visualizations (PNG)")
-print("  📋 1 comparison table (CSV)")
-print("  📝 2 example predictions WITH FULL EXPLAINABILITY (Markdown)")
-print("  💾 1 raw data file (JSON)")
-print("\n🎯 Key Feature: example_predictions_detailed.md shows:")
-print("   - Medical concepts extracted")
-print("   - Evidence spans from clinical text")
-print("   - Clinical knowledge retrieval")
-print("   - Full reasoning chains")
+print("\n📊 Generated Files:")
+print("  • comprehensive_metrics.csv - Core metrics for all models")
+print("  • shifamind_explainability_metrics.csv - Explainability metrics")
+print("  • shifamind_per_diagnosis_f1.csv - Per-diagnosis F1 scores")
+print("  • metrics_comparison.png - Macro/Micro F1 and AUROC comparison")
+print("  • per_diagnosis_f1.png - Per-diagnosis F1 bar chart")
+print("  • explainability_metrics.png - Citation completeness, concepts, calibration")
+print("  • inference_time_comparison.png - Speed comparison")
+print("  • example_predictions_detailed.md - 2 examples with full explainability")
 print("\n" + "="*80)
