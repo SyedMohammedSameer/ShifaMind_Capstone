@@ -129,7 +129,7 @@ bert_tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT"
 bert_model = AutoModel.from_pretrained("emilyalsentzer/Bio_ClinicalBERT").to(device)
 bert_classifier = nn.Linear(768, len(TARGET_CODES)).to(device)
 
-# Load or train baseline
+# Load baseline checkpoint
 baseline_checkpoint_path = BASE_PATH / '03_Models/checkpoints/bioclinicalbert_baseline_final.pt'
 if baseline_checkpoint_path.exists():
     print(f"Loading Bio_ClinicalBERT baseline from {baseline_checkpoint_path}...")
@@ -137,8 +137,16 @@ if baseline_checkpoint_path.exists():
     bert_classifier.load_state_dict(baseline_checkpoint['classifier_state_dict'])
     print("✅ Baseline loaded")
 else:
-    print("⚠️  Bio_ClinicalBERT baseline checkpoint not found.")
-    print("   Baseline will be trained on the test data (this may take a few minutes)...")
+    print("\n" + "="*80)
+    print("❌ ERROR: Bio_ClinicalBERT baseline checkpoint not found!")
+    print("="*80)
+    print(f"\nExpected location: {baseline_checkpoint_path}")
+    print("\nThe baseline model is now trained automatically during main training.")
+    print("\nPlease run:")
+    print("  python final_model_training.py")
+    print("\nThis will train both ShifaMind AND the baseline model.")
+    print("="*80)
+    exit(1)
 
 bert_model.eval(); bert_classifier.eval()
 
@@ -245,164 +253,6 @@ else:
     print("⚠️  Warning: test_data_cache.pkl not found. Metrics will not be computed.")
     print("   Run final_model_training.py first to generate test cache.")
     exit(1)
-
-print()
-
-# ======================
-# TRAIN BASELINE IF NEEDED
-# ======================
-if not baseline_checkpoint_path.exists():
-    print("\n" + "="*80)
-    print("TRAINING BIO_CLINICALBERT BASELINE")
-    print("="*80)
-    print("This is a one-time setup. The trained model will be saved for future use.\n")
-
-    # Load training data from final_model_training cache
-    train_cache_path = BASE_PATH / '04_Results/experiments/training_run/train_data_cache.pkl'
-
-    if not train_cache_path.exists():
-        print("⚠️  Training cache not found. Cannot train baseline without training data.")
-        print("   Using untrained baseline (results will be poor)")
-    else:
-        with open(train_cache_path, 'rb') as f:
-            train_cache = pickle.load(f)
-
-        df_train = train_cache['df_train']
-        df_val = train_cache['df_val']
-
-        # Create datasets
-        class SimpleDataset(Dataset):
-            def __init__(self, texts, labels, tokenizer_obj, max_length=384):
-                self.texts = texts
-                self.labels = labels
-                self.tokenizer = tokenizer_obj
-                self.max_length = max_length
-
-            def __len__(self):
-                return len(self.texts)
-
-            def __getitem__(self, idx):
-                encoding = self.tokenizer(
-                    self.texts[idx],
-                    padding='max_length',
-                    truncation=True,
-                    max_length=self.max_length,
-                    return_tensors='pt'
-                )
-                return {
-                    'input_ids': encoding['input_ids'].squeeze(0),
-                    'attention_mask': encoding['attention_mask'].squeeze(0),
-                    'labels': torch.tensor(self.labels[idx], dtype=torch.float32)
-                }
-
-        # Prepare labels
-        train_labels = []
-        for _, row in df_train.iterrows():
-            label = [0] * len(TARGET_CODES)
-            for code in TARGET_CODES:
-                if code in row['icd_codes']:
-                    label[CODE_TO_LABEL[code]] = 1
-            train_labels.append(label)
-
-        val_labels = []
-        for _, row in df_val.iterrows():
-            label = [0] * len(TARGET_CODES)
-            for code in TARGET_CODES:
-                if code in row['icd_codes']:
-                    label[CODE_TO_LABEL[code]] = 1
-            val_labels.append(label)
-
-        train_dataset = SimpleDataset(df_train['text'].tolist(), train_labels, bert_tokenizer)
-        val_dataset = SimpleDataset(df_val['text'].tolist(), val_labels, bert_tokenizer)
-
-        train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=16)
-
-        # Train baseline
-        print(f"Training on {len(train_dataset)} samples, validating on {len(val_dataset)} samples")
-        print("Training for 3 epochs...\n")
-
-        bert_model.train()
-        bert_classifier.train()
-
-        optimizer = torch.optim.AdamW(list(bert_model.parameters()) + list(bert_classifier.parameters()),
-                                       lr=2e-5, weight_decay=0.01)
-        criterion = nn.BCEWithLogitsLoss()
-
-        best_f1 = 0
-
-        for epoch in range(3):
-            print(f"Epoch {epoch+1}/3")
-            total_loss = 0
-
-            for batch in tqdm(train_loader, desc="  Training"):
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                labels = batch['labels'].to(device)
-
-                optimizer.zero_grad()
-
-                outputs = bert_model(input_ids=input_ids, attention_mask=attention_mask)
-                cls_hidden = outputs.last_hidden_state[:, 0, :]
-                logits = bert_classifier(cls_hidden)
-
-                loss = criterion(logits, labels)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(list(bert_model.parameters()) + list(bert_classifier.parameters()), 1.0)
-
-                optimizer.step()
-                total_loss += loss.item()
-
-            avg_loss = total_loss / len(train_loader)
-
-            # Validation
-            bert_model.eval()
-            bert_classifier.eval()
-
-            all_preds = []
-            all_labels_val = []
-
-            with torch.no_grad():
-                for batch in tqdm(val_loader, desc="  Validation"):
-                    input_ids = batch['input_ids'].to(device)
-                    attention_mask = batch['attention_mask'].to(device)
-                    labels = batch['labels'].to(device)
-
-                    outputs = bert_model(input_ids=input_ids, attention_mask=attention_mask)
-                    cls_hidden = outputs.last_hidden_state[:, 0, :]
-                    logits = bert_classifier(cls_hidden)
-
-                    preds = torch.sigmoid(logits).cpu().numpy()
-                    all_preds.append(preds)
-                    all_labels_val.append(labels.cpu().numpy())
-
-            all_preds = np.vstack(all_preds)
-            all_labels_val = np.vstack(all_labels_val)
-            pred_binary = (all_preds > 0.5).astype(int)
-
-            macro_f1 = f1_score(all_labels_val, pred_binary, average='macro', zero_division=0)
-
-            print(f"  Loss: {avg_loss:.4f}, Val Macro F1: {macro_f1:.4f}")
-
-            if macro_f1 > best_f1:
-                best_f1 = macro_f1
-                # Save checkpoint
-                torch.save({
-                    'classifier_state_dict': bert_classifier.state_dict(),
-                    'macro_f1': macro_f1
-                }, baseline_checkpoint_path)
-                print(f"  ✅ Saved checkpoint (F1: {best_f1:.4f})")
-
-            bert_model.train()
-            bert_classifier.train()
-
-        print(f"\n✅ Baseline training complete. Best F1: {best_f1:.4f}\n")
-
-        # Reload best checkpoint
-        baseline_checkpoint = torch.load(baseline_checkpoint_path, map_location=device)
-        bert_classifier.load_state_dict(baseline_checkpoint['classifier_state_dict'])
-        bert_model.eval()
-        bert_classifier.eval()
 
 print()
 
