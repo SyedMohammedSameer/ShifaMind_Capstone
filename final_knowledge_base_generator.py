@@ -102,8 +102,7 @@ def load_concept_names(mrconso_path: Path, target_keywords: Dict[str, Dict]) -> 
     # Flatten all keywords for searching
     all_keywords = set()
     for dx_keywords in target_keywords.values():
-        for category_keywords in dx_keywords.values():
-            all_keywords.update([k.lower() for k in category_keywords])
+        all_keywords.update([k.lower() for k in dx_keywords])
 
     logger.info(f"Searching for {len(all_keywords)} unique medical terms...")
     logger.info("Filtering out animal/veterinary concepts...")
