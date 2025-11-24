@@ -1241,13 +1241,22 @@ def main(args):
 
     torch.cuda.empty_cache()
 
-    # Save test data for evaluation
+    # Save train/val/test data for evaluation
     test_cache = {
         'df_test': df_test,
         'test_concept_labels': test_concept_labels
     }
     with open(args.output_path / 'test_data_cache.pkl', 'wb') as f:
         pickle.dump(test_cache, f)
+
+    train_cache = {
+        'df_train': df_train,
+        'df_val': df_val,
+        'train_concept_labels': train_concept_labels,
+        'val_concept_labels': val_concept_labels
+    }
+    with open(args.output_path / 'train_data_cache.pkl', 'wb') as f:
+        pickle.dump(train_cache, f)
 
     logger.info("="*80)
     logger.info("✅ ALL TRAINING STAGES COMPLETE!")
