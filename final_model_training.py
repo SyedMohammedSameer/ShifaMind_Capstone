@@ -1241,6 +1241,138 @@ def main(args):
 
     torch.cuda.empty_cache()
 
+    # ========================================================================
+    # TRAIN BIO_CLINICALBERT BASELINE
+    # ========================================================================
+
+    baseline_checkpoint_path = CHECKPOINT_PATH / 'bioclinicalbert_baseline_final.pt'
+
+    if baseline_checkpoint_path.exists() and not args.retrain:
+        logger.info("="*70)
+        logger.info("BIO_CLINICALBERT BASELINE")
+        logger.info("="*70)
+        logger.info(f"✅ Found existing baseline checkpoint: {baseline_checkpoint_path}")
+        logger.info("Skipping baseline training (already trained)")
+    else:
+        logger.info("="*70)
+        logger.info("TRAINING BIO_CLINICALBERT BASELINE")
+        logger.info("="*70)
+        logger.info("Training baseline for fair comparison with ShifaMind...")
+
+        # Initialize baseline model
+        baseline_bert = AutoModel.from_pretrained(BASE_MODEL_NAME).to(device)
+        baseline_classifier = nn.Linear(HIDDEN_SIZE, len(TARGET_CODES)).to(device)
+
+        # Prepare datasets (reuse same data as ShifaMind)
+        train_dataset = ClinicalDataset(
+            df_train['text'].tolist(),
+            df_train['labels'].tolist(),
+            tokenizer,
+            MAX_SEQUENCE_LENGTH
+        )
+        val_dataset = ClinicalDataset(
+            df_val['text'].tolist(),
+            df_val['labels'].tolist(),
+            tokenizer,
+            MAX_SEQUENCE_LENGTH
+        )
+
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=EVAL_BATCH_SIZE)
+
+        logger.info("Starting baseline training (3 epochs)...")
+
+        optimizer = torch.optim.AdamW(
+            list(baseline_bert.parameters()) + list(baseline_classifier.parameters()),
+            lr=LEARNING_RATE,
+            weight_decay=WEIGHT_DECAY
+        )
+        criterion = nn.BCEWithLogitsLoss()
+
+        num_training_steps = 3 * len(train_loader)
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_training_steps // 10,
+            num_training_steps=num_training_steps
+        )
+
+        best_baseline_f1 = 0
+
+        for epoch in range(3):
+            logger.info(f"Epoch {epoch+1}/3")
+
+            baseline_bert.train()
+            baseline_classifier.train()
+            total_loss = 0
+
+            for batch in tqdm(train_loader, desc="Training"):
+                input_ids = batch['input_ids'].to(device)
+                attention_mask = batch['attention_mask'].to(device)
+                labels = batch['labels'].to(device)
+
+                optimizer.zero_grad()
+
+                outputs = baseline_bert(input_ids=input_ids, attention_mask=attention_mask)
+                cls_hidden = outputs.last_hidden_state[:, 0, :]
+                logits = baseline_classifier(cls_hidden)
+
+                loss = criterion(logits, labels)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    list(baseline_bert.parameters()) + list(baseline_classifier.parameters()),
+                    max_norm=GRADIENT_CLIP_NORM
+                )
+
+                optimizer.step()
+                scheduler.step()
+
+                total_loss += loss.item()
+
+            avg_loss = total_loss / len(train_loader)
+
+            # Validation
+            baseline_bert.eval()
+            baseline_classifier.eval()
+            all_preds = []
+            all_labels = []
+
+            with torch.no_grad():
+                for batch in tqdm(val_loader, desc="Validation"):
+                    input_ids = batch['input_ids'].to(device)
+                    attention_mask = batch['attention_mask'].to(device)
+                    labels = batch['labels'].to(device)
+
+                    outputs = baseline_bert(input_ids=input_ids, attention_mask=attention_mask)
+                    cls_hidden = outputs.last_hidden_state[:, 0, :]
+                    logits = baseline_classifier(cls_hidden)
+
+                    preds = torch.sigmoid(logits).cpu().numpy()
+                    all_preds.append(preds)
+                    all_labels.append(labels.cpu().numpy())
+
+            all_preds = np.vstack(all_preds)
+            all_labels = np.vstack(all_labels)
+            pred_binary = (all_preds > 0.5).astype(int)
+
+            macro_f1 = f1_score(all_labels, pred_binary, average='macro', zero_division=0)
+
+            logger.info(f"  Loss: {avg_loss:.4f}")
+            logger.info(f"  Val Macro F1: {macro_f1:.4f}")
+
+            if macro_f1 > best_baseline_f1:
+                best_baseline_f1 = macro_f1
+
+                torch.save({
+                    'classifier_state_dict': baseline_classifier.state_dict(),
+                    'macro_f1': macro_f1
+                }, baseline_checkpoint_path)
+                logger.info(f"  ✅ Saved checkpoint (F1: {best_baseline_f1:.4f})")
+
+        logger.info(f"✅ Baseline training complete. Best F1: {best_baseline_f1:.4f}")
+
+        del baseline_bert, baseline_classifier
+        torch.cuda.empty_cache()
+
     # Save train/val/test data for evaluation
     test_cache = {
         'df_test': df_test,
